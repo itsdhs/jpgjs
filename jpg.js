@@ -42,6 +42,10 @@ var DataBuffer = (function dataBuffer() {
       var r = (index !== undefined) ? index : this.data.length;
       return new DataBuffer( this.data.subarray(this.offset, r) );
     },
+    seekTo: function seekTo(index) {
+      this.offset = index;
+      return this;
+    },
     at: function at(index) {
       var value = this.data[index];
       return value;
@@ -589,15 +593,15 @@ var JpegImage = (function jpegImage() {
         offset += array.length;
         return new DataBuffer(array);
       }
-      function parseIfd(ifdBlock) {
+      function readIfdBlock(appData) {
         var ifdFields = [];
-        var numFields = ifdBlock.readUint16();
+        var numFields = appData.readUint16();
 
         while(numFields > 0) {
-          var tag = ifdBlock.readUint16();
-          var type = ifdBlock.readUint16();
-          var count = ifdBlock.readUint32();
-          var valueOrOffset = ifdBlock.readUint32();
+          var tag = appData.readUint16();
+          var type = appData.readUint16();
+          var count = appData.readUint32();
+          var valueOrOffset = appData.readUint32();
 
           var ifdValues = [];
           switch(type) {
@@ -612,7 +616,7 @@ var JpegImage = (function jpegImage() {
             case 0x5: // rational
             case 0x7: // srational
               // rationals will always be offset
-              var ifdValueBlock = ifdBlock.from(valueOrOffset);
+              var ifdValueBlock = appData.from(valueOrOffset);
               for(var i = 0; i < count; i++) {
                 var num = ifdValueBlock.readUint32();
                 var den = ifdValueBlock.readUint32();
@@ -634,6 +638,68 @@ var JpegImage = (function jpegImage() {
           numFields -= 1;
         }
         return ifdFields;
+      }
+      function decodeGpsData(gpsIfdEntries) {
+        function decodeLatLng(deg, min, sec) {
+          return deg + (min / 60) + (sec / 3600);
+        }
+        function decodeAscii(hexCode) {
+          return String.fromCharCode(parseInt(hexCode, 16));
+        }
+
+        var gpsDataObj = {}, gpsEntry, values;
+        for (var i = gpsIfdEntries.length - 1; i >= 0; i--) {
+          gpsEntry = gpsIfdEntries[i];
+          values = gpsEntry.values;
+
+          switch(gpsEntry.tag) {
+            case 0x0: // GPS tag version
+              continue;
+            case 0x1: // North or South Latitude
+              gpsDataObj.latRef = decodeAscii(values[0].toString(16).substr(0, 2));
+              continue;
+            case 0x2: // Latitude
+              gpsDataObj.lat = decodeLatLng(values[0], values[1], values[2]);
+              continue;
+            case 0x3: // East or West Longitude
+              gpsDataObj.lngRef = decodeAscii(values[0].toString(16).substr(0, 2));
+              continue;
+            case 0x4: // Longitude
+              gpsDataObj.lng = decodeLatLng(values[0], values[1], values[2]);
+              continue;
+            case 0x5: // Altitude reference
+            case 0x6: // Altitude
+            case 0x7: // GPS time (atomic clock)
+            case 0x8: // GPS satellites used for measurement
+            case 0x9: // GPS receiver status
+            case 0xA: // GPS measurement mode
+            case 0xB: // Measurement precision
+            case 0xC: // Speed unit
+            case 0xD: // Speed of GPS receiver
+            case 0xE: // Reference for direction of movement
+            case 0xF: // Direction of movement
+            case 0x10: // Reference for direction of image
+            case 0x11: // Direction of image
+            case 0x12: // Geodetic survey data used
+            case 0x13: // Reference for latitude of destination
+            case 0x14: // Latitude of destination
+            case 0x15: // Reference for longitude of destination
+            case 0x16: // Longitude of destination
+            case 0x17: // Reference for bearing of destination
+            case 0x18: // Bearing of destination
+            case 0x19: // Reference for distance to destination
+            case 0x1A: // Distance to destination
+            case 0x1B: // Name of GPS processing method
+            case 0x1C: // Name of GPS area
+            case 0x1D: // GPS date
+            case 0x1E: // GPS differential correction
+              continue;
+            default:
+              throw "Unsupported GPS tag type: 0x" + gpsEntry.tag.toString(16);
+          }
+        }
+
+        return gpsDataObj;
       }
       function prepareComponents(frame) {
         var maxH = 0, maxV = 0;
@@ -671,6 +737,7 @@ var JpegImage = (function jpegImage() {
         frame.mcusPerLine = mcusPerLine;
         frame.mcusPerColumn = mcusPerColumn;
       }
+      var gps = null;
       var jfif = null;
       var adobe = null;
       var pixels = null;
@@ -689,14 +756,13 @@ var JpegImage = (function jpegImage() {
           case 0xFFE0: // APP0 (Application Specific)
           case 0xFFE1: // APP1
             var appData = readDataBlock();
+            // Trim APP1 header for IFD offsets
+            var appDataBody = appData.from(6);
 
             var exifCode = appData.readUint32();
             if (exifCode !== 0x45786966) {  // 'Exif'
               throw new "EXIF Identifier code not found";
             }
-
-            // Throw away the next 16 bits, padding...
-            var appDataBody = appData.from(6);
 
             // TIFF Header
             var isBigEndian = (appDataBody.readUint16()) == 0x4d4d;
@@ -705,14 +771,18 @@ var JpegImage = (function jpegImage() {
             var ifd0Offset = appDataBody.readUint32();
 
             // IFD0 Interop data
-            var ifd0 = parseIfd(appDataBody);
-            for (var i = ifd0.length - 1; i >= 0; i--) {
+            var ifd0 = readIfdBlock(appDataBody.seekTo(ifd0Offset));
+            for (i = ifd0.length - 1; i >= 0; i--) {
               var ifdEntry = ifd0[i];
 
               switch(ifdEntry.tag) {
                 case 0x8769:  // TODO: Exif IFD
                   break;
-                case 0x8825:  // TODO: GPS IFD
+                case 0x8825:  // GPS IFD
+                  var gpsIfdOffset = ifdEntry.values[0];
+                  var gpsIfd = readIfdBlock(appDataBody.seekTo(gpsIfdOffset));
+
+                  gps = decodeGpsData(gpsIfd);
                   break;
                 case 0xA005:  // TODO: Interoperability IFD
                   break;
@@ -879,6 +949,7 @@ var JpegImage = (function jpegImage() {
 
       this.width = frame.samplesPerLine;
       this.height = frame.scanLines;
+      this.gps = gps;
       this.jfif = jfif;
       this.adobe = adobe;
       this.components = [];
