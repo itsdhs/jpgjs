@@ -24,6 +24,48 @@
 //   in PostScript Level 2, Technical Note #5116
 //   (partners.adobe.com/public/developer/en/ps/sdk/5116.DCT_Filter.pdf)
 
+var DataBuffer = (function dataBuffer() {
+  "use strict";
+
+  function constructor(data) {
+    this.data = data;
+    this.length = data.length;
+    this.offset = 0;
+  }
+
+  constructor.prototype = {
+    from: function from(index) {
+      var l = (index !== undefined) ? index : this.offset;
+      return new DataBuffer( this.data.subarray(l, this.data.length) );
+    },
+    until: function until(index) {
+      var r = (index !== undefined) ? index : this.data.length;
+      return new DataBuffer( this.data.subarray(this.offset, r) );
+    },
+    at: function at(index) {
+      var value = this.data[index];
+      return value;
+    },
+    readUint8: function readUint8() {
+      var value = this.data[this.offset];
+      this.offset += 1;
+      return value;
+    },
+    readUint16: function readUint16() {
+      var value = (this.data[this.offset] << 8) | this.data[this.offset+1];
+      this.offset += 2;
+      return value;
+    },
+    readUint32: function readUint32() {
+      var value = (this.data[this.offset] << 24) | (this.data[this.offset+1] << 16) | (this.data[this.offset+2] << 8) | this.data[this.offset+3];
+      this.offset += 4;
+      return value;
+    }
+  };
+
+  return constructor;
+})();
+
 var JpegImage = (function jpegImage() {
   "use strict";
   var dctZigZag = new Int32Array([
@@ -545,7 +587,7 @@ var JpegImage = (function jpegImage() {
         var length = readUint16();
         var array = data.subarray(offset, offset + length - 2);
         offset += array.length;
-        return array;
+        return new DataBuffer(array);
       }
       function prepareComponents(frame) {
         var maxH = 0, maxV = 0;
@@ -618,28 +660,27 @@ var JpegImage = (function jpegImage() {
             var appData = readDataBlock();
 
             if (fileMarker === 0xFFE0) {
-              if (appData[0] === 0x4A && appData[1] === 0x46 && appData[2] === 0x49 &&
-                appData[3] === 0x46 && appData[4] === 0) { // 'JFIF\x00'
+              var jfifTag = appData.readUint16();
+              if (jfifTag === 0x4A464946 && appData.readUint8 === 0) { // 'JFIF\x00'
                 jfif = {
-                  version: { major: appData[5], minor: appData[6] },
-                  densityUnits: appData[7],
-                  xDensity: (appData[8] << 8) | appData[9],
-                  yDensity: (appData[10] << 8) | appData[11],
-                  thumbWidth: appData[12],
-                  thumbHeight: appData[13],
-                  thumbData: appData.subarray(14, 14 + 3 * appData[12] * appData[13])
+                  version: { major: appData.readUint8(), minor: appData.readUint8() },
+                  densityUnits: appData.readUint8(),
+                  xDensity: appData.readUint16(),
+                  yDensity: appData.readUint16(),
+                  thumbWidth: appData.readUint8(),
+                  thumbHeight: appData.readUint8(),
+                  thumbData: appData.from(14).until(14 + 3 * appData.at(12) * appData.at(13))
                 };
               }
             }
             // TODO APP1 - Exif
-            if (fileMarker === 0xFFEE) {
-              if (appData[0] === 0x41 && appData[1] === 0x64 && appData[2] === 0x6F &&
-                appData[3] === 0x62 && appData[4] === 0x65 && appData[5] === 0) { // 'Adobe\x00'
+            else if (fileMarker === 0xFFEE) {
+              if (appData.readUint32() === 0x41646F62 && appData.readUint16() === 0x6500) { // 'Adobe\x00'
                 adobe = {
-                  version: appData[6],
-                  flags0: (appData[7] << 8) | appData[8],
-                  flags1: (appData[9] << 8) | appData[10],
-                  transformCode: appData[11]
+                  version: appData.readUint8(),
+                  flags0: appData.readUint16(),
+                  flags1: appData.readUint16(),
+                  transformCode: appData.readUint8()
                 };
               }
             }
