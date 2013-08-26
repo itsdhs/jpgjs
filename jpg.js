@@ -589,6 +589,52 @@ var JpegImage = (function jpegImage() {
         offset += array.length;
         return new DataBuffer(array);
       }
+      function parseIfd(ifdBlock) {
+        var ifdFields = [];
+        var numFields = ifdBlock.readUint16();
+
+        while(numFields > 0) {
+          var tag = ifdBlock.readUint16();
+          var type = ifdBlock.readUint16();
+          var count = ifdBlock.readUint32();
+          var valueOrOffset = ifdBlock.readUint32();
+
+          var ifdValues = [];
+          switch(type) {
+            case 0x1: // byte
+            case 0x2: // ascii
+            case 0x3: // short
+            case 0x4: // long
+            case 0x9: // slong
+              // TODO: Support offset based on count
+              ifdValues.push(valueOrOffset);
+              break;
+            case 0x5: // rational
+            case 0x7: // srational
+              // rationals will always be offset
+              var ifdValueBlock = ifdBlock.from(valueOrOffset);
+              for(var i = 0; i < count; i++) {
+                var num = ifdValueBlock.readUint32();
+                var den = ifdValueBlock.readUint32();
+
+                ifdValues.push( (num / den) );
+              }
+              break;
+            default:
+              throw "Unsupported ifd tag type: 0x" + type.toString(16);
+          }
+
+          ifdFields.push({
+            tag: tag,
+            type: type,
+            count: count,
+            values: ifdValues
+          });
+
+          numFields -= 1;
+        }
+        return ifdFields;
+      }
       function prepareComponents(frame) {
         var maxH = 0, maxV = 0;
         var component, componentId;
@@ -642,6 +688,39 @@ var JpegImage = (function jpegImage() {
         switch(fileMarker) {
           case 0xFFE0: // APP0 (Application Specific)
           case 0xFFE1: // APP1
+            var appData = readDataBlock();
+
+            var exifCode = appData.readUint32();
+            if (exifCode !== 0x45786966) {  // 'Exif'
+              throw new "EXIF Identifier code not found";
+            }
+
+            // Throw away the next 16 bits, padding...
+            var appDataBody = appData.from(6);
+
+            // TIFF Header
+            var isBigEndian = (appDataBody.readUint16()) == 0x4d4d;
+            // Skip 16 bits, unused '42'
+            appDataBody.readUint16();
+            var ifd0Offset = appDataBody.readUint32();
+
+            // IFD0 Interop data
+            var ifd0 = parseIfd(appDataBody);
+            for (var i = ifd0.length - 1; i >= 0; i--) {
+              var ifdEntry = ifd0[i];
+
+              switch(ifdEntry.tag) {
+                case 0x8769:  // TODO: Exif IFD
+                  break;
+                case 0x8825:  // TODO: GPS IFD
+                  break;
+                case 0xA005:  // TODO: Interoperability IFD
+                  break;
+                default:
+                  break;
+              }
+            };
+            break;
           case 0xFFE2: // APP2
           case 0xFFE3: // APP3
           case 0xFFE4: // APP4
